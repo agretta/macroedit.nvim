@@ -20,6 +20,7 @@ local M = {
 		default_mappings = {
 			q = 'macroedit_close()',
 		},
+		enable_per_register_keymap = true
 	}
 }
 
@@ -41,6 +42,18 @@ function M.setup(usr_config)
 		M.config = vim.tbl_extend('force', M.config, usr_config)
 	end
 
+	if M.config.enable_per_register_keymap then
+		-- TODO use get_char to get the mapping c@ working
+		-- https://stackoverflow.com/questions/69191079/how-to-do-mark-like-mapping-in-vim
+		-- api.nvim_set_keymap('n', '<Plug>MacroEditReg', [[<CMD>lua require("macroedit").macroedit_open(vim.cmd"getchar()")<CR>", {noremap = true}]], {})
+		-- api.nvim_set_keymap('n', 'c@', "<Plug>MacroEditReg <CR>", {})
+		local opts = {noremap = true, silent = false}
+		for _, value in ipairs(utils.get_regs()) do
+			api.nvim_set_keymap('n', 'c@'..value, "<CMD>MacroEditOpen "..value.."<CR>", opts)
+		end
+	end
+
+
 	return M
 end
 
@@ -51,14 +64,14 @@ local function close_all_windows()
 	end
 end
 
-local function get_edit_buffer(content)
+local function get_edit_buffer(macro_register)
 	local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
-  api.nvim_buf_set_option(0, 'filetype', 'macro')
+  api.nvim_buf_set_option(buf, 'filetype', 'macro')
 
 	-- insert content into the buffer
-	api.nvim_buf_set_lines(buf, 0, -1, false, content)
-	api.nvim_buf_set_name(buf, "Macro @???")
+	api.nvim_buf_set_lines(buf, 0, -1, false, utils.split(utils.get_register_contents(macro_register)))
+	api.nvim_buf_set_name(buf, "@"..macro_register)
 
 	return buf
 end
@@ -68,19 +81,8 @@ end
 local function execute_macro(macro_register)
 	local macro = utils.get_register_contents(macro_register)
 	local keys = vim.api.nvim_replace_termcodes(macro, true, false, true)
-	-- _P(keys)
 	api.nvim_feedkeys(keys, 'x', false)
 end
-
--- local function execute_macro_by_key(macro_register)
--- 	local macro = utils.get_register_contents(macro_register)
--- 	local keys = vim.api.nvim_replace_termcodes(macro, true, false, true)
--- 	keys:gsub(".", function(c)
--- 		_P(c)
--- 		vim.fn.wait(10, function() end)
--- 		api.nvim_feedkeys(c, 'm', false)
--- 	end)
--- end
 
 -- run a macro in a window/buffer
 local function run_macro(macro_buf, macro_register, opts)
@@ -140,17 +142,84 @@ local function add_save_events(buf, register)
 	})
 end
 
-local function apply_scratch_opts(buf)
-	-- set the filetype so there is highlighting in the window
-	-- TODO see if there is a smarter way of doing this
-	-- TODO see what other options may need to get set
-	-- TODO buf_out should not be editable
-	local filetype = api.nvim_buf_get_option(0, 'filetype')
-	api.nvim_buf_set_option(buf, "filetype", filetype)
-	-- api.nvim_buf_set_option(buf, "modifiable", false)
+--- @return windows
+--- @return buffers
+local function launch_split(mregister)
+	local current_window = api.nvim_get_current_win()
+	local current_buffer = api.nvim_get_current_buf()
+	local current_cursor = api.nvim_win_get_cursor(current_window)
+	local current_text = api.nvim_buf_get_lines(current_buffer, 0, -1, false)
+	local current_filetype = api.nvim_buf_get_option(current_buffer, 'filetype')
+
+	vim.cmd('split')
+	local target_win = vim.api.nvim_get_current_win()
+	local target_buf = vim.api.nvim_create_buf(false, true)
+	api.nvim_buf_set_option(target_buf, "filetype", current_filetype)
+	api.nvim_buf_set_lines(target_buf, 0, -1, false, current_text)
+	vim.api.nvim_win_set_buf(target_win, target_buf)
+
+	vim.cmd('vsplit')
+	local macro_win = vim.api.nvim_get_current_win()
+	local macro_buf = get_edit_buffer(mregister)
+	vim.api.nvim_win_set_buf(macro_win, macro_buf)
+
+	vim.cmd('vsplit')
+	local start_win = vim.api.nvim_get_current_win()
+	local start_buf = vim.api.nvim_create_buf(false, true)
+	api.nvim_buf_set_option(start_buf, "filetype", current_filetype)
+	api.nvim_buf_set_lines(start_buf, 0, -1, false, current_text)
+	vim.api.nvim_win_set_buf(start_win, start_buf)
+
+	add_edit_events(macro_buf, mregister, {
+			target_window = target_win,
+			target_buffer = target_buf,
+			cursor_pos = current_cursor,
+			current_text = current_text
+		})
+	add_close_events(start_buf)
+	add_close_events(macro_buf)
+	add_close_events(target_buf)
+
+	return {start_buf, macro_buf, target_buf}, {start_win, macro_win, target_win}
+end
+--- @return windows
+--- @return buffers
+local function launch_vsplit(mregister)
+	local current_window = api.nvim_get_current_win()
+	local current_buffer = api.nvim_get_current_buf()
+	local current_cursor = api.nvim_win_get_cursor(current_window)
+	local current_text = api.nvim_buf_get_lines(current_buffer, 0, -1, false)
+
+	vim.cmd('vsplit')
+	local target_win = vim.api.nvim_get_current_win()
+	local target_buf = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_win_set_buf(target_win, target_buf)
+
+	vim.cmd('split')
+	local macro_win = vim.api.nvim_get_current_win()
+	local macro_buf = get_edit_buffer(mregister)
+	vim.api.nvim_win_set_buf(macro_win, macro_buf)
+
+	vim.cmd('split')
+	local start_win = vim.api.nvim_get_current_win()
+	local start_buf = vim.api.nvim_create_buf(false, true)
+	api.nvim_buf_set_lines(start_buf, 0, -1, false, current_text)
+	vim.api.nvim_win_set_buf(start_win, start_buf)
+
+	add_edit_events(macro_buf, mregister, {
+			target_window = target_win,
+			target_buffer = target_buf,
+			cursor_pos = current_cursor,
+			current_text = current_text
+		})
+	add_close_events(start_buf)
+	add_close_events(macro_buf)
+	add_close_events(target_buf)
+
+	return {start_buf, macro_buf, target_buf}, {start_win, macro_win, target_win}
 end
 
---- a simple floating window to edit the macro that outputs changes to a buffer
+--- a simple floating window to edit the macro that outputs changes to the buffer
 --- @return windows
 --- @return buffers
 local function launch_current(mregister)
@@ -159,7 +228,7 @@ local function launch_current(mregister)
 	local current_cursor = api.nvim_win_get_cursor(current_window)
 
 	-- get a buffer with the contents of a macro register
-	local buf = get_edit_buffer(utils.split(utils.get_register_contents(mregister)))
+	local buf = get_edit_buffer(mregister)
 
   -- get dimensions of nvim
   local nvim_width = api.nvim_get_option("columns")
@@ -196,7 +265,7 @@ end
 local function launch_minimal(mregister)
 
 	-- get a buffer containing the the macro register
-	local buf = get_edit_buffer(utils.split(utils.get_register_contents(mregister)))
+	local buf = get_edit_buffer(mregister)
 
   -- get dimensions of nvim
   local nvim_width = api.nvim_get_option("columns")
@@ -230,10 +299,15 @@ local function launch(mregister, selection)
 
 	local buffers = {}
 	local windows = {}
+	-- TODO this should be a table switch
 	if M.config.default_launch_mode == "minimal" then
 		buffers, windows = launch_minimal(mregister)
 	elseif M.config.default_launch_mode == "current" then
 		buffers, windows = launch_current(mregister)
+	elseif M.config.default_launch_mode == "split" then
+		buffers, windows = launch_split(mregister)
+	elseif M.config.default_launch_mode == "vsplit" then
+		buffers, windows = launch_vsplit(mregister)
 	end
 
 	M._state.macroedit_buffers = buffers
@@ -274,27 +348,21 @@ function M.macroedit_toggle(opts)
 	end
 end
 
-api.nvim_create_user_command('MacroEditOpen',
+-- macroedit.nvim user commands
+api.nvim_create_user_command(
+	'MacroEditOpen',
 	function(opts) M.macroedit_open(opts) end,
-	{desc = '', nargs="*", range = true})
-api.nvim_create_user_command('MacroEditClose',
+	{desc = 'MacroEditOpen', nargs="*", range = true}
+)
+api.nvim_create_user_command(
+	'MacroEditClose',
 	function() M.macroedit_close() end,
-	{desc = ''})
-api.nvim_create_user_command('MacroEditToggle',
+	{desc = 'MacroEditOpen'}
+)
+api.nvim_create_user_command(
+	'MacroEditToggle',
 	function(opts) M.macroedit_toggle(opts) end,
-	{desc = '', nargs="*", range = true})
-
--- TODO use get_char to get the mapping c@ working
--- https://stackoverflow.com/questions/69191079/how-to-do-mark-like-mapping-in-vim
-local opts = {noremap = true, silent = false}
--- api.nvim_set_keymap('n', '<Plug>MacroEditReg', [[<CMD>lua require("macroedit").macroedit_open(vim.cmd"getchar()")<CR>", {noremap = true}]], {})
--- api.nvim_set_keymap('n', 'c@', "<Plug>MacroEditReg <CR>", {})
-for _, value in ipairs(utils.get_regs()) do
-	api.nvim_set_keymap('n', 'c@'..value, "<CMD>MacroEditOpen "..value.."<CR>", opts)
-end
-
-api.nvim_set_keymap('n', '<leader>mo', "<CMD>MacroEditOpen<CR>", opts)
-api.nvim_set_keymap('n', '<leader>mc', "<CMD>MacroEditClose<CR>", opts)
-api.nvim_set_keymap('n', '<leader>mt', "<CMD>MacroEditToggle<CR>", opts)
+	{desc = 'MacroEditToggle', nargs="*", range = true}
+)
 
 return M
