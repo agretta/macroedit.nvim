@@ -1,291 +1,259 @@
-if _G.loaded_macroedit then
-  return
+-- TODO remove the debug logger
+_P = function(v)
+  print(vim.inspect(v))
+  vim.notify(vim.inspect(v))
+  return v
 end
+
+if _G.loaded_macroedit then return end
 _G.loaded_macroedit = 1
 
-M = {_state = {}}
-local function debug(...) vim.notify(vim.inspect(...)) end
+local M = {
+	_state = {
+		macroedit_buffers = {},
+		macroedit_windows = {},
+		is_open = false,
+	},
+	config = {
+		default_launch_mode = 'current',
+		default_macro_register = 'q',
+		default_mappings = {
+			q = 'macroedit_close()',
+		},
+	}
+}
 
-local buf_in, buf_out, buf_macro
-local win_in, win_out, win_macro
-
-M._state.macroedit_buffers = {}
-M._state.macroedit_windows = {}
-M._state.is_open = false
-
--- check that register is one of these
-local ALL_REGISTERS = { "*", "+", "\"", "-", "/", "_", "=", "#", "%", ".", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z" }
-local current_window = 0
+local utils = require("macroedit.utils")
+local ui = require("macroedit.ui")
 local api = vim.api
 
--- TODO dosent currently work, need to investigate
-local function set_mappings()
-	for buf, _ in pairs(M._state.macroedit_buffers) do
-		for k,v in pairs(M.mappings) do
-			api.nvim_buf_set_keymap(buf, 'n', k, ':lua require"setup/macroedit".'..v..'<cr>', {
-				nowait = true, noremap = true, silent = true
-			})
+-- adds a table of keybindings to a list of buffers
+local function set_mappings(buffers)
+	for _, buf in ipairs(buffers) do
+		for k,v in pairs(M.config.default_mappings) do
+			api.nvim_buf_set_keymap(buf, 'n', k, ':lua require"macroedit".'..v..'<cr>', {noremap = true, silent = true, nowait = true})
 		end
 	end
 end
 
 function M.setup(usr_config)
-	M.config = {
-		default_macro_register = 'q',
-		default_selection_register = '"',
-		default_to_visual_selection = true,
-		default_mappings = { q = 'macroedit_close()', },
-	}
 	if usr_config then
 		M.config = vim.tbl_extend('force', M.config, usr_config)
 	end
 
-	set_mappings()
 	return M
-end
-
--- Get the contents of the register
-local function get_register_contents(register_name)
-	return vim.fn.getreg(register_name, 1, nil)
-end
-
--- check if the register contains anything, if not, return false, nil
-local function get_register_contents_opt(register_name)
-	local opt_value = get_register_contents(register_name)
-
-	local is_empty = #opt_value == 0
-
-	if not is_empty then
-		is_empty = #(opt_value:match("^%s*(.-)%s*$")) == 0
-	end
-
-	if is_empty then return false, nil end
-	return true, opt_value
-end
-
--- set the contents of the register
-local function set_register_contents(register_name, contents)
-	return vim.fn.setreg(register_name, contents)
-end
-
-local function split (inputstr)
-	local sep = "\n"
-	local t = {}
-	for str in string.gmatch(inputstr, "([^"..sep.."]+)") do
-		table.insert(t, str)
-	end
-	return t
-end
-
-local function unsplit(tb)
-	local s = ""
-	if #tb == 1 then
-		return table.remove(tb)
-	end
-	for _, v in pairs(tb) do
-		s = s..v.."\n"
-	end
-	return s
 end
 
 -- close all windows and delete all temporary buffers
 local function close_all_windows()
 	for _, win in ipairs(M._state.macroedit_windows) do
-		if api.nvim_win_is_valid(win) then
-			api.nvim_win_close(win, false)
-		end
+		ui.close_window(win)
 	end
-
-	-- for _, buf in ipairs(macroedit_buffers) do
-	-- 	if win then api.nvim_buf_delete(buf, {force = true}) end
-	-- end
 end
 
--- create a bordered window around the params
--- TODO implement
-local function get_selected_region()
-end
-
-local function set_buffer_opts(buf, selection_lines)
+local function get_edit_buffer(content)
+	local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_option(buf, 'bufhidden', 'wipe')
-	api.nvim_buf_set_lines(buf, 0, -1, false, selection_lines)
+  api.nvim_buf_set_option(0, 'filetype', 'macro')
+
+	-- insert content into the buffer
+	api.nvim_buf_set_lines(buf, 0, -1, false, content)
+	api.nvim_buf_set_name(buf, "Macro @???")
+
+	return buf
 end
 
--- execute a macro
---- @param macro_register string #Macro string to be executed
+-- Sends input keys to nvim from a register
+--- @param macro_register string #register of macro to be executed
 local function execute_macro(macro_register)
-	local macro = get_register_contents(macro_register)
+	local macro = utils.get_register_contents(macro_register)
 	local keys = vim.api.nvim_replace_termcodes(macro, true, false, true)
+	-- _P(keys)
 	api.nvim_feedkeys(keys, 'x', false)
 end
 
-local function execute_macro_in_window(macro_register, window)
-	local cursor_pos = {1,0}
-	api.nvim_set_current_win(window)
-	api.nvim_win_set_cursor(window, cursor_pos)
-	execute_macro(macro_register)
+-- local function execute_macro_by_key(macro_register)
+-- 	local macro = utils.get_register_contents(macro_register)
+-- 	local keys = vim.api.nvim_replace_termcodes(macro, true, false, true)
+-- 	keys:gsub(".", function(c)
+-- 		_P(c)
+-- 		vim.fn.wait(10, function() end)
+-- 		api.nvim_feedkeys(c, 'm', false)
+-- 	end)
+-- end
+
+-- run a macro in a window/buffer
+local function run_macro(macro_buf, macro_register, opts)
+
+	-- save the macro from the macro buffer
+	local macro = utils.unsplit(api.nvim_buf_get_lines(macro_buf, 0, -1, false))
+
+	-- update the register with the edited macro
+	utils.set_register_contents(macro_register, macro)
+
+	-- reset the target buffer
+	api.nvim_buf_set_lines(opts.target_buffer, 0, -1, false, opts.current_text)
+
+	-- execute the macro in the target window/buffer
+	vim.api.nvim_win_call(opts.target_window,
+		function()
+			api.nvim_buf_call(opts.target_buffer,
+				function()
+					api.nvim_win_set_cursor(0, opts.cursor_pos)
+					execute_macro(macro_register)
+				end)
+		end)
+
 end
 
--- couldnt get vim.api.nvim_win_call to work so this is the alternative until I understand it
-local function wrap_window_call(fn)
-	local save_window = api.nvim_get_current_win()
-	local save_buffer = api.nvim_get_current_buf()
-	local save_cursor = api.nvim_win_get_cursor(current_window)
-	fn()
-	api.nvim_set_current_win(save_window)
-	api.nvim_set_current_buf(save_buffer)
-	api.nvim_win_set_cursor(save_window, save_cursor)
+-- Add editing text autocmds to the buffer
+local function add_edit_events(buf, register, opts)
+	local edit_events = {"InsertLeave", "TextChanged"} -- , "TextChangedI"}
+	api.nvim_create_autocmd(edit_events, {
+		group = "MacroEdit",
+		buffer = buf,
+		callback = function ()
+			run_macro(buf, register, opts)
+		end,
+	})
 end
 
-local function run_macro_callback(clean_buf, dirty_buf, macro_buf, macro_register)
-	-- save the macro from the  macro buffer
-	local macro = unsplit(api.nvim_buf_get_lines(macro_buf, 0, -1, false))
-	set_register_contents(macro_register, macro)
-
-	-- get the text from the clean buffer
-	local lines = api.nvim_buf_get_lines(clean_buf, 0, -1, false)
-
-	-- load the dirty buffer with the clean lines
-	api.nvim_buf_set_lines(dirty_buf, 0, -1, false, lines)
-
-	-- run the macro on the dirty buffer
-	wrap_window_call(function() execute_macro_in_window(macro_register, win_out) end)
+-- Add autocmds for when the buffer is exited
+local function add_close_events(buf)
+	local close_events = {"BufDelete", "WinClosed"} -- "BufLeave"
+	api.nvim_create_autocmd(close_events, {
+		group = "MacroEdit",
+		buffer = buf,
+		callback = function () M.macroedit_close() end,
+	})
 end
 
-local function launch_windows(macro_register, selection)
-	buf_in = api.nvim_create_buf(false, true)
-	buf_out = api.nvim_create_buf(false, true)
-	buf_macro = api.nvim_create_buf(false, true)
+-- Add autocmds to save macro register contents on edit
+local function add_save_events(buf, register)
+	local edit_events = {"InsertLeave", "TextChanged", "TextChangedI"}
+	api.nvim_create_autocmd(edit_events, {
+		group = "MacroEdit",
+		buffer = buf,
+		callback = function ()
+			utils.set_register_contents(register, utils.unsplit(api.nvim_buf_get_lines(buf, 0, -1, false)))
+		end,
+	})
+end
 
+local function apply_scratch_opts(buf)
 	-- set the filetype so there is highlighting in the window
 	-- TODO see if there is a smarter way of doing this
 	-- TODO see what other options may need to get set
 	-- TODO buf_out should not be editable
 	local filetype = api.nvim_buf_get_option(0, 'filetype')
-	api.nvim_buf_set_option(buf_in, "filetype", filetype)
-	api.nvim_buf_set_option(buf_out, "filetype", filetype)
-	set_buffer_opts(buf_macro, split(get_register_contents(macro_register)))
-	set_buffer_opts(buf_in, selection)
-	set_buffer_opts(buf_out, selection)
+	api.nvim_buf_set_option(buf, "filetype", filetype)
+	-- api.nvim_buf_set_option(buf, "modifiable", false)
+end
 
-	-- inputsave() might be useful here for TextChangedI
-	local edit_events = {"InsertLeave", "TextChanged"} --"TextChangedI",
-	local close_events = {"BufDelete", "WinClosed"} -- "BufLeave"
-	api.nvim_create_augroup('MacroEdit', {clear = true})
-	api.nvim_create_autocmd(edit_events, {
-		group = "MacroEdit",
-		buffer = buf_macro,
-		callback = function ()
-			run_macro_callback(buf_in, buf_out, buf_macro, macro_register)
-		end,
-	})
+--- a simple floating window to edit the macro that outputs changes to a buffer
+--- @return windows
+--- @return buffers
+local function launch_current(mregister)
+	local current_window = api.nvim_get_current_win()
+	local current_buffer = api.nvim_get_current_buf()
+	local current_cursor = api.nvim_win_get_cursor(current_window)
 
-	-- if one window is closed, the others are as well
-	api.nvim_create_autocmd(close_events, {
-		group = "MacroEdit",
-		buffer = buf_macro,
-		callback = function () M.macroedit_close() end,
-	})
-	api.nvim_create_autocmd(close_events, {
-		group = "MacroEdit",
-		buffer = buf_in,
-		callback = function () M.macroedit_close() end,
-	})
-	api.nvim_create_autocmd(close_events, {
-		group = "MacroEdit",
-		buffer = buf_out,
-		callback = function () M.macroedit_close() end,
-	})
+	-- get a buffer with the contents of a macro register
+	local buf = get_edit_buffer(utils.split(utils.get_register_contents(mregister)))
 
-  -- get dimensions
-  local width = api.nvim_get_option("columns")
-  local height = api.nvim_get_option("lines")
+  -- get dimensions of nvim
+  local nvim_width = api.nvim_get_option("columns")
 
   -- calculate macro window dimensions and position
   local macro_win_height = 1
-  local macro_win_width = math.ceil(width * 0.3)
-	local row = 1
-	local col = math.ceil((width*0.5)-(macro_win_width/2))
+  local macro_win_width = math.ceil(nvim_width * 0.3)
+	local row = ui.get_vcenter(-1, macro_win_height)
+	local col = ui.get_hcenter(-1, macro_win_width)
 
-  local win_height = #selection + math.ceil(#selection * 0.4)
-	if win_height > math.ceil(height*0.4) then
-		win_height = math.ceil(height*0.4)
-	elseif win_height < 2 then
-		win_height = 2
-	end
-
-  local win_width = math.ceil(width * 0.3)
-
-  local macro_opts = {
-    style = "minimal",
-    relative = "editor",
+  local opts = {
     width = macro_win_width,
     height = macro_win_height,
     row = row,
     col = col,
-		border = "rounded",
+		focusable = true,
   }
-	-- make window for macro editing
-  win_macro = api.nvim_open_win(buf_macro, true, macro_opts)
+  local win = ui.open_window(buf, true, opts)
 
-	-- 2nd window should be directly underneath the macro window
-	-- relative = "win" is having weird movement issues
-  local view_opts = {
-    style = "minimal",
-    relative = "editor",
-    width = win_width,
-    height = win_height,
-    row = macro_win_height+3,
+	add_edit_events(buf, mregister, {
+			target_window = current_window,
+			target_buffer = current_buffer,
+			cursor_pos = current_cursor,
+			current_text = api.nvim_buf_get_lines(current_buffer, 0, -1, false)
+		})
+	add_close_events(buf)
+
+	return {buf}, {win}
+end
+
+--- a simple floating window to edit a macro register
+--- @return windows
+--- @return buffers
+local function launch_minimal(mregister)
+
+	-- get a buffer containing the the macro register
+	local buf = get_edit_buffer(utils.split(utils.get_register_contents(mregister)))
+
+  -- get dimensions of nvim
+  local nvim_width = api.nvim_get_option("columns")
+
+  -- calculate macro window dimensions and position
+  local macro_win_height = 1
+  local macro_win_width = math.ceil(nvim_width * 0.3)
+	local row = ui.get_vcenter(-1, macro_win_height)
+	local col = ui.get_hcenter(-1, macro_win_width)
+
+  local opts = {
+    width = macro_win_width,
+    height = macro_win_height,
+    row = row,
     col = col,
-		border = "rounded",
-		focusable = false,
+		focusable = true,
   }
-  win_in = api.nvim_open_win(buf_in, false, view_opts)
+  local win = ui.open_window(buf, true, opts)
 
-	-- 3rd window should be directly underneath the 2nd window
-	-- view_opts.win = win_in
-	view_opts.row = view_opts.row + win_height +2
-  win_out = api.nvim_open_win(buf_out, false, view_opts)
-	M._state.macroedit_buffers = {buf_in, buf_out, buf_macro}
-  M._state.macroedit_windows = {win_in, win_out, win_macro}
+	add_save_events(buf, mregister)
+	add_close_events(buf)
+
+	return {buf}, {win}
 end
 
 -- get the text selection as needed and launch the editing windows
-local function launch(macro_register, selection)
-	-- get the text selection
-	if M.config.default_to_visual_selection then
-		selection = get_selected_region()
-	elseif not selection and M.config.default_selection_register then
-		selection = get_register_contents(M.config.default_selection_register)
+local function launch(mregister, selection)
+	if not selection then selection = "" end
+
+	api.nvim_create_augroup('MacroEdit', {clear = true})
+
+	local buffers = {}
+	local windows = {}
+	if M.config.default_launch_mode == "minimal" then
+		buffers, windows = launch_minimal(mregister)
+	elseif M.config.default_launch_mode == "current" then
+		buffers, windows = launch_current(mregister)
 	end
 
-	if not selection then
-		selection = ""
-	end
-	debug(selection)
-	-- launch the windows
-	launch_windows(macro_register, split(selection))
+	M._state.macroedit_buffers = buffers
+  M._state.macroedit_windows = windows
+
+	set_mappings(buffers)
 end
-
--- function M.switch_to_macro_window()
--- 	if win_macro then api.nvim_set_current_win(win_macro) end
--- end
-
--- function M.switch_to_in_window()
--- 	if win_in then api.nvim_set_current_win(win_in) end
--- end
-
--- function M.switch_to_out_window()
--- 	if win_out then api.nvim_set_current_win(win_out) end
--- end
-
 
 --- Open the MacroEdit windows
 function M.macroedit_open(opts)
 	if M._state.is_open then return end
 
 	local reg = M.config.default_macro_register
-	if opts and opts.fargs[0] then reg = opts.fargs[0] end
+	if opts and opts.fargs and #opts.fargs > 0 then
+		-- TODO verify is register here
+		reg, _ = unpack(opts.fargs)
+
+		-- if called with @ as an argument, set it to the " register
+		if reg == '@' then reg = '"' end
+	end
 	launch(reg)
 	M._state.is_open = true
 end
@@ -308,14 +276,25 @@ end
 
 api.nvim_create_user_command('MacroEditOpen',
 	function(opts) M.macroedit_open(opts) end,
-	{desc = '', nargs="*", range=true})
+	{desc = '', nargs="*", range = true})
 api.nvim_create_user_command('MacroEditClose',
 	function() M.macroedit_close() end,
 	{desc = ''})
 api.nvim_create_user_command('MacroEditToggle',
 	function(opts) M.macroedit_toggle(opts) end,
-	{desc = '', nargs="*"})
+	{desc = '', nargs="*", range = true})
 
-vim.api.nvim_set_keymap('', "mg", '<CMD>lua test()<CR>', {noremap = true})
+-- TODO use get_char to get the mapping c@ working
+-- https://stackoverflow.com/questions/69191079/how-to-do-mark-like-mapping-in-vim
+local opts = {noremap = true, silent = false}
+-- api.nvim_set_keymap('n', '<Plug>MacroEditReg', [[<CMD>lua require("macroedit").macroedit_open(vim.cmd"getchar()")<CR>", {noremap = true}]], {})
+-- api.nvim_set_keymap('n', 'c@', "<Plug>MacroEditReg <CR>", {})
+for _, value in ipairs(utils.get_regs()) do
+	api.nvim_set_keymap('n', 'c@'..value, "<CMD>MacroEditOpen "..value.."<CR>", opts)
+end
+
+api.nvim_set_keymap('n', '<leader>mo', "<CMD>MacroEditOpen<CR>", opts)
+api.nvim_set_keymap('n', '<leader>mc', "<CMD>MacroEditClose<CR>", opts)
+api.nvim_set_keymap('n', '<leader>mt', "<CMD>MacroEditToggle<CR>", opts)
 
 return M
